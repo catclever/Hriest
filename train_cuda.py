@@ -86,7 +86,7 @@ def main():
         "data/Basic_ZH/embs/hy-tmp/bge_embeddings.npy",
         "data/Basic_ZH/embs/hy-tmp/text2vec_embeddings.npy"
     ]
-    
+
     dataloader = MultiEmbDataLoader(
         parquet_path="data/Basic_ZH/chunked_mixed_wiki.parquet",
         emb_paths=emb_files,

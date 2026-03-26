@@ -40,9 +40,9 @@ class SensoryFuserCUDA(nn.Module):
 class GodEncoderCUDA(nn.Module):
     def __init__(self, d_model, z_dim):
         super().__init__()
-        self.fc1 = nn.Linear(d_model, d_model * 2)
+        self.fc1 = nn.Linear(d_model, d_model)
         self.gelu = nn.GELU()
-        self.fc2 = nn.Linear(d_model * 2, z_dim)
+        self.fc2 = nn.Linear(d_model, z_dim)
         
     def forward(self, x):
         return self.fc2(self.gelu(self.fc1(x)))
@@ -54,9 +54,17 @@ def load_mlx_safetensors_into_torch(torch_module, safetensor_path):
     """
     from safetensors.torch import load_file
     state_dict = load_file(safetensor_path)
-    
-    # MLX sometimes stores weights with extra nesting or different naming conventions,
-    # but for simple nn.Sequential / nn.Linear instances, the names usually align perfectly.
+    target_keys = set(torch_module.state_dict().keys())
+    if not any(k in target_keys for k in state_dict.keys()):
+        remapped = {}
+        for k, v in state_dict.items():
+            new_k = k
+            new_k = new_k.replace(".net.layers.0.", ".fc1.")
+            new_k = new_k.replace(".net.layers.2.", ".fc2.")
+            new_k = new_k.replace("net.layers.0.", "fc1.")
+            new_k = new_k.replace("net.layers.2.", "fc2.")
+            remapped[new_k] = v
+        state_dict = remapped
     torch_module.load_state_dict(state_dict, strict=False)
     torch_module.eval()
     for param in torch_module.parameters():
