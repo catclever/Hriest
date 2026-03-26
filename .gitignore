@@ -1,0 +1,13 @@
+# AI Agent Workspace
+.agent/
+
+# Python
+__pycache__/
+*.pyc
+
+# MLX Checkpoints
+*.safetensors
+checkpoints/
+
+# PyTorch Checkpoints
+*.pt
