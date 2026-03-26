@@ -10,13 +10,8 @@ from model.god_encoder import GodEncoder
 from training.core.dataloader import MultiEmbDataLoader
 from training.char_tokenizer import CharTokenizer
 from training.core.checkpoint import Checkpointer
+from training.core.schedule import linear_warmup_schedule
 from distilled_emb.model import TinyCharEncoder
-
-def custom_lr_schedule(global_step: int, max_lr: float, warmup_steps: int):
-    # Absolute linear warmup from 0
-    if global_step < warmup_steps:
-        return max_lr * (global_step / warmup_steps)
-    return max_lr
 
 def get_distill_parser():
     parser = argparse.ArgumentParser(description="Standalone Embedding Distillation (Teacher -> Student)")
@@ -92,12 +87,8 @@ def main():
     checkpointer.register_args(args)
     
     start_step = checkpointer.load_latest()
-    
     # 5. Optimizer
-    def lr_fn(step):
-         return custom_lr_schedule(step, args.lr, args.warmup_steps)
-         
-    optimizer = optim.AdamW(learning_rate=lr_fn)
+    optimizer = optim.AdamW(learning_rate=args.lr)
     
     # 6. Loss Definition (MSE)
     def loss_fn(model, token_inputs, attention_mask, z_target_truth):
@@ -132,9 +123,11 @@ def main():
                 f_t = fuser(batch_embs, weights=None) 
                 z_target_truth = god_encoder(f_t) # Shape: (B, 1, z_dim) or (B, z_dim)
                 
-                # Squeeze the seq_len dimension because GodEncoder output is sometimes (B, 1, z_dim)
                 if len(z_target_truth.shape) == 3:
                      z_target_truth = mx.squeeze(z_target_truth, axis=1)
+                
+                # Sync LR natively
+                optimizer.learning_rate = linear_warmup_schedule(global_step, args.lr, args.warmup_steps)
                 
                 # 8b. Train Student (JIT Compiled Fwd+Bwd, Python Opt Update)
                 loss, grads = step_fn(token_inputs, attention_mask, z_target_truth)
