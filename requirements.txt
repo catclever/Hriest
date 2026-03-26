@@ -2,10 +2,15 @@
 # Distilled Embedding Engine Requirements
 # ==========================================
 
-# Core Deep Learning Framworks
+# [Backend Selection: Choose ONE]
+# --------------------------------
+# Option A: PyTorch/CUDA Backend (For NVIDIA Linux Clusters & MPS Fallback)
 torch>=2.0.0
-mlx>=0.14.0
 safetensors
+
+# Option B: Apple Silicon MLX Backend (For ultra-fast Local Mac pure development)
+# Uncomment the line below and comment out torch if strictly using the MLX framework
+# mlx>=0.14.0
 
 # Data Processing
 numpy
