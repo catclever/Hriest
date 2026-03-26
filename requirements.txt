@@ -1,0 +1,22 @@
+# ==========================================
+# Distilled Embedding Engine Requirements
+# ==========================================
+
+# Core Deep Learning Framworks
+torch>=2.0.0
+mlx>=0.14.0
+safetensors
+
+# Data Processing
+numpy
+pandas
+pyarrow
+
+# ==========================================
+# GodCore Infrastructure External Dependency
+# ==========================================
+# In production, the training core is expected to be an external package install:
+# pip install git+https://github.com/YourOrg/GodCore-Infrastructure.git
+#
+# For local development with the Submodule topology, install the local path in editable mode:
+# -e ../training/core
