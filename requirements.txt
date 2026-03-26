@@ -21,7 +21,7 @@ pyarrow
 # GodCore Infrastructure External Dependency
 # ==========================================
 # In production, the training core is expected to be an external package install:
-pip install git+https://github.com/catclever/Huntun.git
+git+https://github.com/catclever/Huntun.git
 #
 # For local development with the Submodule topology, install the local path in editable mode:
 # -e ../training/core
