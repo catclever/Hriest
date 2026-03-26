@@ -4,13 +4,17 @@ import torch.optim as optim
 import torch.nn.functional as F
 import math
 import os
+import sys
+# Auto-resolve the parent workspace root and force it to the FRONT of the import path
+# This prevents the local `model.py` file from aggressively shadowing the parent `model/` package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import argparse
 
 from training.core.dataloader import MultiEmbDataLoader
-from training.char_tokenizer import CharTokenizer
+from training.core.char_tokenizer import CharTokenizer
 from training.core.checkpoint import Checkpointer
 from model.config import ModelConfig
-from distilled_emb.model_cuda import TinyCharEncoderCUDA, GodEncoderCUDA, SensoryFuserCUDA, load_mlx_safetensors_into_torch
+from model_cuda import TinyCharEncoderCUDA, GodEncoderCUDA, SensoryFuserCUDA, load_mlx_safetensors_into_torch
 
 def custom_lr_schedule(global_step: int, max_lr: float, warmup_steps: int):
     # Absolute linear warmup from 0
