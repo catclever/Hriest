@@ -65,11 +65,130 @@ def load_mlx_safetensors_into_torch(torch_module, safetensor_path):
             new_k = new_k.replace("net.layers.2.", "fc2.")
             remapped[new_k] = v
         state_dict = remapped
+    # Add support for WeakDecoder if any key needs remapping (it perfectly matches)
+    for k in list(state_dict.keys()):
+        if k.endswith('.wq.weight'):
+            state_dict[k.replace('.wq.', '.query_proj.')] = state_dict.pop(k)
+        elif k.endswith('.wk.weight'):
+            state_dict[k.replace('.wk.', '.key_proj.')] = state_dict.pop(k)
+        elif k.endswith('.wv.weight'):
+            state_dict[k.replace('.wv.', '.value_proj.')] = state_dict.pop(k)
+        elif k.endswith('.wo.weight'):
+            state_dict[k.replace('.wo.', '.out_proj.')] = state_dict.pop(k)
+
     torch_module.load_state_dict(state_dict, strict=False)
     torch_module.eval()
     for param in torch_module.parameters():
         param.requires_grad = False
     print(f"Successfully bridged MLX safetensors to PyTorch from: {safetensor_path}")
+
+
+class WeakTransformerLayerCUDA(nn.Module):
+    def __init__(self, d_model=128, n_heads=4, mlp_dims=512):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attention = nn.ModuleDict({
+            'query_proj': nn.Linear(d_model, d_model, bias=False),
+            'key_proj': nn.Linear(d_model, d_model, bias=False),
+            'value_proj': nn.Linear(d_model, d_model, bias=False),
+            'out_proj': nn.Linear(d_model, d_model, bias=False)
+        })
+        self.ln2 = nn.LayerNorm(d_model)
+        self.linear1 = nn.Linear(d_model, mlp_dims)
+        self.linear2 = nn.Linear(mlp_dims, d_model)
+        self.n_heads = n_heads
+        
+    def forward(self, x, mask=None):
+        h = self.ln1(x)
+        B, L, D = h.shape
+        H = self.n_heads
+        D_h = D // H
+        
+        q = self.attention['query_proj'](h).view(B, L, H, D_h).transpose(1, 2)
+        k = self.attention['key_proj'](h).view(B, L, H, D_h).transpose(1, 2)
+        v = self.attention['value_proj'](h).view(B, L, H, D_h).transpose(1, 2)
+        
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = out.transpose(1, 2).contiguous().view(B, L, D)
+        out = self.attention['out_proj'](out)
+        
+        x = x + out
+        h = self.ln2(x)
+        x = x + self.linear2(F.relu(self.linear1(h)))
+        return x
+
+class WeakTransformerEncoderCUDA(nn.Module):
+    def __init__(self, num_layers=2, dims=128, num_heads=4, mlp_dims=512):
+        super().__init__()
+        self.layers = nn.ModuleList([WeakTransformerLayerCUDA(dims, num_heads, mlp_dims) for _ in range(num_layers)])
+        self.ln = nn.LayerNorm(dims)
+        
+    def forward(self, x, mask=None):
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.ln(x)
+
+class WeakDecoderCUDA(nn.Module):
+    """
+    PyTorch instantiation of WeakDecoder.
+    """
+    def __init__(self, z_dim: int, vocab_size: int, d_model: int = 128, n_layers: int = 2):
+        super().__init__()
+        self.z_dim = z_dim
+        self.vocab_size = vocab_size
+        self.z_proj = nn.Linear(z_dim, d_model)
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.transformer = WeakTransformerEncoderCUDA(n_layers, d_model, 4, d_model * 4)
+        self.out_proj = nn.Linear(d_model, vocab_size)
+
+    def forward(self, z_target: torch.Tensor, token_inputs: torch.Tensor):
+        z_projected = self.z_proj(z_target) # (B, d_model)
+        x = self.embedding(token_inputs) # (B, L, d_model)
+        x = x + z_projected.unsqueeze(1)
+        
+        L = x.shape[1]
+        causal_mask = torch.ones((L, L), dtype=torch.bool, device=x.device).tril()
+        mask = causal_mask.unsqueeze(0).unsqueeze(0) # (1, 1, L, L)
+        
+        x = self.transformer(x, mask=mask)
+        logits = self.out_proj(x)
+        return logits
+        
+    def generate(self, z_target: torch.Tensor, start_token: int, eos_token: int = None, max_tokens: int = 50, temperature: float = 0.7):
+        self.eval()
+        z_projected = self.z_proj(z_target) # (1, d_model)
+        device = z_target.device
+        
+        tokens = torch.tensor([[start_token]], device=device)
+        result_tokens = [start_token]
+        
+        with torch.no_grad():
+            for i in range(max_tokens):
+                x = self.embedding(tokens) # (1, seq_len, d_model)
+                x = x + z_projected.unsqueeze(1)
+                
+                L = x.shape[1]
+                causal_mask = torch.ones((L, L), dtype=torch.bool, device=x.device).tril()
+                mask = causal_mask.unsqueeze(0).unsqueeze(0)
+                
+                x = self.transformer(x, mask=mask)
+                logits = self.out_proj(x[:, -1, :]) # (1, vocab_size)
+                
+                if temperature == 0:
+                    next_token = torch.argmax(logits, dim=-1).item()
+                else:
+                    # Scale logits by temperature and sample
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).item()
+                    
+                result_tokens.append(next_token)
+                
+                if eos_token is not None and next_token == eos_token:
+                    break
+                    
+                tokens = torch.tensor([result_tokens], device=device)
+                
+        return result_tokens
 
 
 # =========================================================================
