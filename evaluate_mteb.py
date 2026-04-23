@@ -1,7 +1,8 @@
 import argparse
 import numpy as np
-import mlx.core as mx
 import os
+import json
+import sys
 
 try:
     import mteb
@@ -10,15 +11,22 @@ except ImportError:
     import sys
     sys.exit(1)
 
-from training.char_tokenizer import CharTokenizer
-from model.config import ModelConfig
-from distilled_emb.model import TinyCharEncoder
+# Avoid local /home/Hriest/model.py shadowing /home/HollyShit/model package.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir in sys.path and os.path.exists(os.path.join(script_dir, "model.py")):
+    sys.path = [p for p in sys.path if p != script_dir] + [script_dir]
 
-class TinyMTEBWrapper:
+from training.core.char_tokenizer import CharTokenizer
+from model.config import ModelConfig
+from model_cuda import TinyCharEncoderCUDA
+
+class TinyMTEBWrapperMLX:
     """
     将我们自研的 MLX TinyCharEncoder 包装成标准的 MTEB 调用接口。
     """
     def __init__(self, model, tokenizer, max_seq_len=512):
+        import mlx.core as mx
+        self.mx = mx
         self.model = model
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -42,6 +50,11 @@ class TinyMTEBWrapper:
                     "languages": self.languages,
                     "release_date": self.release_date
                 }
+            def model_copy(self, update=None):
+                if update:
+                    for k, v in update.items():
+                        setattr(self, k, v)
+                return self
                 
             def __getattr__(self, name):
                 return None
@@ -89,49 +102,159 @@ class TinyMTEBWrapper:
                 padded_ids.append(seq + [self.tokenizer.pad_token_id] * pad_len)
                 masks.append([1] * len(seq) + [0] * pad_len)
                 
-            x_mx = mx.array(padded_ids)
-            mask_mx = mx.array(masks)
+            x_mx = self.mx.array(padded_ids)
+            mask_mx = self.mx.array(masks)
             
             # Predict & Convert back to flat numpy
             z_pred_mx = self.model(x_mx, mask_mx)
-            mx.eval(z_pred_mx) # Force array evaluation
+            self.mx.eval(z_pred_mx) # Force array evaluation
             all_embs.append(np.array(z_pred_mx))
             
         return np.concatenate(all_embs, axis=0)
+
+
+class TinyMTEBWrapperTorch:
+    def __init__(self, model, tokenizer, max_seq_len=512):
+        import torch
+        self.torch = torch
+        self.model = model.eval()
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.device = next(model.parameters()).device
+    
+    @property
+    def mteb_model_meta(self):
+        class MockMeta:
+            name = "TinyCharEncoderCUDA"
+            revision = "1.0.0"
+            release_date = "2026-03-25"
+            languages = ["cmn"]
+            framework = []
+            def model_name_as_path(self):
+                return "TinyCharEncoderCUDA"
+            def to_dict(self):
+                return {
+                    "name": self.name,
+                    "revision": self.revision,
+                    "languages": self.languages,
+                    "release_date": self.release_date
+                }
+            def model_copy(self, update=None):
+                if update:
+                    for k, v in update.items():
+                        setattr(self, k, v)
+                return self
+            def __getattr__(self, name):
+                return None
+        return MockMeta()
+    
+    def similarity(self, embeddings1, embeddings2):
+        emb1 = embeddings1 / np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        emb2 = embeddings2 / np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        return emb1 @ emb2.T
+    
+    def similarity_pairwise(self, embeddings1, embeddings2):
+        emb1 = embeddings1 / np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        emb2 = embeddings2 / np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        return np.sum(emb1 * emb2, axis=1)
+    
+    def encode(self, sentences, batch_size=256, **kwargs):
+        if type(sentences).__name__ == "DataLoader":
+            flat_sentences = []
+            for batch in sentences:
+                if isinstance(batch, (list, tuple)):
+                    flat_sentences.extend(batch)
+                elif isinstance(batch, dict):
+                    flat_sentences.extend(list(batch.values())[0])
+                else:
+                    flat_sentences.append(batch)
+            sentences = flat_sentences
+        elif not isinstance(sentences, list):
+            sentences = list(sentences)
+        
+        all_embs = []
+        with self.torch.no_grad():
+            for i in range(0, len(sentences), batch_size):
+                batch = sentences[i : i + batch_size]
+                encoded = [self.tokenizer.encode(t, add_special_tokens=True)[:self.max_seq_len] for t in batch]
+                max_len = max(len(seq) for seq in encoded)
+                padded_ids = []
+                masks = []
+                for seq in encoded:
+                    pad_len = max_len - len(seq)
+                    padded_ids.append(seq + [self.tokenizer.pad_token_id] * pad_len)
+                    masks.append([1] * len(seq) + [0] * pad_len)
+                token_inputs = self.torch.tensor(padded_ids, dtype=self.torch.long, device=self.device)
+                attention_mask = self.torch.tensor(masks, dtype=self.torch.float32, device=self.device)
+                z_pred = self.model(token_inputs, attention_mask)
+                all_embs.append(z_pred.cpu().numpy())
+        return np.concatenate(all_embs, axis=0)
+
+
+def load_student_dims_from_args(ckpt_dir: str):
+    args_path = os.path.join(ckpt_dir, "training_args.json")
+    d_model, n_heads, n_layers = 1024, 8, 6
+    if os.path.exists(args_path):
+        with open(args_path, "r", encoding="utf-8") as f:
+            train_args = json.load(f)
+        d_model = int(train_args.get("student_d_model", d_model))
+        n_heads = int(train_args.get("student_n_heads", n_heads))
+        n_layers = int(train_args.get("student_n_layers", n_layers))
+    return d_model, n_heads, n_layers
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone C-MTEB Evaluator")
     parser.add_argument("--ckpt", type=str, required=True, help="训练好的 TinyBERT checkpoint 路径 (例如 checkpoints/distilled/tinybert_v1_step_50000)")
     parser.add_argument("--tasks", type=str, nargs="+", default=["LCQMC", "BQCorpus", "AFQMC"], help="想要测的 C-MTEB 任务名")
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"], help="仅用于 .pt 模型评测")
     args = parser.parse_args()
 
-    # 1. 初始化相同的架构
+    # 1. 初始化与训练一致的架构
     config = ModelConfig()
     tokenizer = CharTokenizer()
+    d_model, n_heads, n_layers = load_student_dims_from_args(args.ckpt)
     
-    print(f"Loading NativeCharEncoder Weights from {args.ckpt}...")
-    model = TinyCharEncoder(
-        vocab_size=config.vocab_size,
-        d_model=1024,
-        n_heads=8,
-        n_layers=6,
-        max_seq_len=config.max_seq_len,
-        z_dim=config.z_dim
-    )
-    
-    # Load MLX explicit safetensor mapped weights
-    model_path = f"{args.ckpt}/student.safetensors"
-    if not os.path.exists(model_path):
-        print(f"[错误] 在 {args.ckpt} 下没找到 student.safetensors。请确保训练已经保存！")
+    pt_path = os.path.join(args.ckpt, "student.pt")
+    mlx_path = os.path.join(args.ckpt, "student.safetensors")
+    if os.path.exists(pt_path):
+        import torch
+        if args.device == "auto":
+            device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+        else:
+            device = torch.device(args.device)
+        print(f"Loading PyTorch TinyCharEncoder from {pt_path} on {device} ...")
+        model = TinyCharEncoderCUDA(
+            vocab_size=config.vocab_size,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            max_seq_len=config.max_seq_len,
+            z_dim=config.z_dim
+        ).to(device)
+        state = torch.load(pt_path, map_location=device)
+        model.load_state_dict(state, strict=True)
+        fast_wrapper = TinyMTEBWrapperTorch(model, tokenizer, max_seq_len=config.max_seq_len)
+    elif os.path.exists(mlx_path):
+        import mlx.core as mx
+        from distilled_emb.model import TinyCharEncoder
+        print(f"Loading MLX TinyCharEncoder from {mlx_path} ...")
+        model = TinyCharEncoder(
+            vocab_size=config.vocab_size,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            max_seq_len=config.max_seq_len,
+            z_dim=config.z_dim
+        )
+        model.load_weights(mlx_path)
+        mx.eval(model.parameters())
+        fast_wrapper = TinyMTEBWrapperMLX(model, tokenizer, max_seq_len=config.max_seq_len)
+    else:
+        print(f"[错误] 在 {args.ckpt} 下没找到 student.pt 或 student.safetensors。")
         return
-        
-    model.load_weights(model_path)
-    mx.eval(model.parameters())
-    print("模型加载完成。极其轻量级，即将开启火力！")
-
-    # 2. 包装模型并启动 MTEB 霸榜
-    fast_wrapper = TinyMTEBWrapper(model, tokenizer, max_seq_len=config.max_seq_len)
+    
+    print("模型加载完成。即将启动评测。")
     
     print(f"\n=============================================")
     print(f"开始启动 C-MTEB 评测任务：{args.tasks}")
