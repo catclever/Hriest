@@ -70,7 +70,7 @@ class TinyCharEncoder(nn.Module):
         # Final projection from inner transformer dimension to the absolute GodEncoder semantic space dimension
         self.out_proj = nn.Linear(d_model, z_dim)
         
-    def __call__(self, x: mx.array, attention_mask: mx.array = None) -> mx.array:
+    def __call__(self, x: mx.array, attention_mask: mx.array = None, return_seq: bool = False) -> mx.array:
         """
         x: (B, L)
         attention_mask: (B, L) where 1 is valid, 0 is pad
@@ -90,6 +90,9 @@ class TinyCharEncoder(nn.Module):
             h = layer(h, mask)
             
         h = self.final_ln(h)
+        
+        if return_seq:
+            return self.out_proj(h) # (B, L, z_dim)
         
         # Average Pooling (Masked) to extract the holistic sentence representation
         if attention_mask is not None:
