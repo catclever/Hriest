@@ -25,8 +25,8 @@ import argparse
 from training.core.dataloader import MultiEmbDataLoader, ChunkedNpzDataLoader
 from training.core.char_tokenizer import CharTokenizer
 from training.core.checkpoint import Checkpointer
-from model.config import ModelConfig
-from model_cuda import TinyCharEncoderCUDA, GodEncoderCUDA, SensoryFuserCUDA, load_mlx_safetensors_into_torch
+from model.config import WeakDecoderConfig
+from model_cuda import TinyCharEncoderCUDA, GodEncoderCUDA, SensoryFuserCUDA, WeakDecoderCUDA, load_mlx_safetensors_into_torch
 
 def custom_lr_schedule(global_step: int, max_lr: float, warmup_steps: int):
     # Absolute linear warmup from 0
@@ -802,6 +802,9 @@ def get_distill_parser():
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=1e-4) # Safe default LR for deep networks
     parser.add_argument("--warmup_steps", type=int, default=5000)
+    parser.add_argument("--ce_start_step", type=int, default=10000, help="Step to start fading in CE loss")
+    parser.add_argument("--ce_full_step", type=int, default=20000, help="Step where CE loss reaches full weight")
+    parser.add_argument("--ce_max_weight", type=float, default=10.0, help="Maximum weight for the Cross Entropy loss")
     parser.add_argument("--max_seq_len", type=int, default=256)
     parser.add_argument("--save_steps", type=int, default=10000)
     parser.add_argument("--out_dir", type=str, default="checkpoints/distilled")
@@ -841,7 +844,7 @@ def main():
     if args.download_cache_dir is None:
         args.download_cache_dir = args.data_dir
 
-    config = ModelConfig()
+    config = WeakDecoderConfig()
     config.max_seq_len = args.max_seq_len
 
     tokenizer = CharTokenizer()
@@ -868,6 +871,17 @@ def main():
     print(f"\n[Bridging MLX -> PyTorch] Loading Frozen Teacher Safetensors from {args.p0_ckpt}...")
     load_mlx_safetensors_into_torch(fuser, fuser_path)
     load_mlx_safetensors_into_torch(god_encoder, god_path)
+    
+    # 1.5 Load Frozen WeakDecoder for Reconstruction Guidance
+    print(f"[Bridging MLX -> PyTorch] Loading Frozen WeakDecoder from {args.p0_ckpt}...")
+    decoder = WeakDecoderCUDA(z_dim=z_dim, vocab_size=config.vocab_size, d_model=256, n_layers=4).to(device)
+    decoder_path = os.path.join(args.p0_ckpt, "decoder.safetensors")
+    if not os.path.exists(decoder_path):
+        decoder_path = os.path.join(args.p0_ckpt, "weak_decoder.safetensors")
+    load_mlx_safetensors_into_torch(decoder, decoder_path)
+    decoder.eval()
+    for param in decoder.parameters():
+        param.requires_grad = False
 
     # 2. Instantiate the Tiny Student Encoder
     print("[Student] Initializing PyTorch TinyCharEncoder (FlashAttention-2 + RoPE enabled)...")
@@ -883,7 +897,7 @@ def main():
     # 3. Optimizer & AMP Scaler
     optimizer = optim.AdamW(student.parameters(), lr=args.lr, weight_decay=0.01)
     use_amp = (device.type == "cuda")
-    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     # 4. Universal Checkpointer
     checkpointer = Checkpointer(args.out_dir, prefix=args.ckpt_prefix)
@@ -944,7 +958,7 @@ def main():
                 
                 # D: Forward Pass (Using Dynamic AMP casting)
                 # Note: No custom compilation closure necessary in PyTorch natively
-                with torch.amp.autocast('cuda', enabled=use_amp):
+                with torch.autocast(device_type='cuda', enabled=use_amp):
                     # Ground Truth Target Logic
                     with torch.no_grad():
                         f_t = fuser(batch_embs, weights=None) 
@@ -954,8 +968,46 @@ def main():
                              
                     # Student Logic (The heavy lifting graph)
                     z_pred = student(token_inputs, attention_mask)
-                    # MSE Loss against the exact Absolute Spatial Dimensional Vector
-                    loss = F.mse_loss(z_pred, z_target_truth)
+                    
+                    # 1. MSE Loss (Topology Anchoring)
+                    # FIX: Use reduction='none', sum over features, mean over batch to prevent 1/1024 gradient dilution
+                    loss_mse = F.mse_loss(z_pred, z_target_truth, reduction='none').sum(dim=1).mean()
+                    
+                    # --- 2. InfoNCE Loss (Spatial Repulsion) ---
+                    z_pred_norm = F.normalize(z_pred, p=2, dim=1)
+                    z_target_norm = F.normalize(z_target_truth, p=2, dim=1)
+                    similarity_matrix = torch.matmul(z_pred_norm, z_target_norm.T)
+                    tau = 0.1
+                    logits = similarity_matrix / tau
+                    labels = torch.arange(token_inputs.size(0), device=device)
+                    loss_infonce = F.cross_entropy(logits, labels)
+                    
+                    # --- 3. WeakDecoder CE Loss (Semantic Anchoring) ---
+                    decoder_inputs = token_inputs[:, :-1]
+                    decoder_targets = token_inputs[:, 1:]
+                    decoder_logits = decoder(z_pred, decoder_inputs)
+                    
+                    pad_token_id = tokenizer.pad_token_id if hasattr(tokenizer, 'pad_token_id') else 0
+                    loss_ce = F.cross_entropy(
+                        decoder_logits.reshape(-1, config.vocab_size), 
+                        decoder_targets.reshape(-1), 
+                        ignore_index=pad_token_id
+                    )
+                    
+                    # Dynamic Curriculum Learning Weights
+                    if global_step <= args.ce_start_step:
+                        ce_weight = 0.0
+                        infonce_weight = 0.1 # ALWAYS ON to prevent mean collapse!
+                    elif global_step <= args.ce_full_step:
+                        alpha = (global_step - args.ce_start_step) / float(args.ce_full_step - args.ce_start_step)
+                        ce_weight = alpha * args.ce_max_weight
+                        infonce_weight = 0.1 # ALWAYS ON
+                    else:
+                        ce_weight = args.ce_max_weight
+                        infonce_weight = 0.1
+                    
+                    # --- Ultimate Fusion ---
+                    loss = loss_mse + infonce_weight * loss_infonce + ce_weight * loss_ce
                     
                 # E: Backward execution with AMP Loss Scaling
                 scaler.scale(loss).backward()
@@ -969,7 +1021,7 @@ def main():
                 scaler.update()
                 
                 if global_step % 10 == 0:
-                     print(f"Epoch {epoch+1} | Step {global_step} | Distill PyTorch MSE: {loss.item():.4f}")
+                     print(f"Epoch {epoch+1} | Step {global_step} | Total: {loss.item():.4f} (MSE: {loss_mse.item():.4f} | InfoNCE: {loss_infonce.item():.4f} * {infonce_weight:.2f} | CE: {loss_ce.item():.4f} * {ce_weight:.2f})")
                      
                 if global_step % args.save_steps == 0:
                      checkpointer.save(global_step)

@@ -312,3 +312,78 @@ class TinyCharEncoderCUDA(nn.Module):
             h_pool = h.mean(dim=1)
             
         return self.out_proj(h_pool)
+
+class StrongDecoderCUDA(nn.Module):
+    """
+    A powerful AR Decoder with RoPE and sufficient capacity.
+    Takes z_target as prefix or added bias to tokens.
+    """
+    def __init__(self, z_dim: int, vocab_size: int, d_model: int = 512, n_layers: int = 6, n_heads: int = 8):
+        super().__init__()
+        self.z_dim = z_dim
+        self.vocab_size = vocab_size
+        self.z_proj = nn.Linear(z_dim, d_model)
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.layers = nn.ModuleList([RoPETransformerLayerCUDA(d_model, n_heads) for _ in range(n_layers)])
+        self.final_ln = nn.LayerNorm(d_model)
+        self.out_proj = nn.Linear(d_model, vocab_size)
+        
+        nn.init.normal_(self.embedding.weight, mean=0.0, std=d_model**-0.5)
+
+    def forward(self, z_target: torch.Tensor, token_inputs: torch.Tensor):
+        z_projected = self.z_proj(z_target) # (B, d_model)
+        x = self.embedding(token_inputs) # (B, L, d_model)
+        
+        # Add Z to all token embeddings
+        x = x + z_projected.unsqueeze(1)
+        
+        B, L, D = x.shape
+        # Causal mask for PyTorch SDPA
+        causal_mask = torch.ones((L, L), dtype=torch.bool, device=x.device).tril()
+        
+        for layer in self.layers:
+            x = layer(x, mask=causal_mask)
+            
+        x = self.final_ln(x)
+        logits = self.out_proj(x)
+        return logits
+        
+    def generate(self, z_target: torch.Tensor, start_token: int, eos_token: int = None, max_tokens: int = 50, temperature: float = 0.7):
+        self.eval()
+        z_projected = self.z_proj(z_target) # (1, d_model)
+        device = z_target.device
+        
+        tokens = torch.tensor([[start_token]], device=device)
+        result_tokens = [start_token]
+        
+        with torch.no_grad():
+            for i in range(max_tokens):
+                x = self.embedding(tokens) # (1, seq_len, d_model)
+                x = x + z_projected.unsqueeze(1)
+                
+                L = x.shape[1]
+                causal_mask = torch.ones((L, L), dtype=torch.bool, device=device).tril()
+                
+                for layer in self.layers:
+                    x = layer(x, mask=causal_mask)
+                
+                x_final = self.final_ln(x)
+                logits = self.out_proj(x_final[:, -1, :]) # (1, vocab_size)
+                
+                if temperature == 0:
+                    next_token = torch.argmax(logits, dim=-1).item()
+                else:
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).item()
+                    
+                result_tokens.append(next_token)
+                
+                if eos_token is not None and next_token == eos_token:
+                    break
+                    
+                tokens = torch.tensor([result_tokens], device=device)
+                
+        return result_tokens
+
+
+

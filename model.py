@@ -106,3 +106,5 @@ class TinyCharEncoder(nn.Module):
         z_pred = self.out_proj(h_pool) # (B, z_dim)
         
         return z_pred
+
+
