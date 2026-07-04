@@ -10,12 +10,15 @@ import math
 class AdapterCUDA(nn.Module):
     def __init__(self, in_dim: int, out_dim: int):
         super().__init__()
+        self.norm = nn.LayerNorm(in_dim)
+        self.scale = 1.0 / (in_dim ** 0.5)
         self.fc1 = nn.Linear(in_dim, out_dim)
-        self.gelu = nn.GELU()
+        self.silu = nn.SiLU()
         self.fc2 = nn.Linear(out_dim, out_dim)
 
     def forward(self, x):
-        return self.fc2(self.gelu(self.fc1(x)))
+        x = self.norm(x) * self.scale
+        return self.fc2(self.silu(self.fc1(x)))
 
 class SensoryFuserCUDA(nn.Module):
     def __init__(self, emb_dims, z_dim):
@@ -41,11 +44,11 @@ class GodEncoderCUDA(nn.Module):
     def __init__(self, d_model, z_dim):
         super().__init__()
         self.fc1 = nn.Linear(d_model, d_model)
-        self.gelu = nn.GELU()
+        self.silu = nn.SiLU()
         self.fc2 = nn.Linear(d_model, z_dim)
         
     def forward(self, x):
-        return self.fc2(self.gelu(self.fc1(x)))
+        return self.fc2(self.silu(self.fc1(x)))
 
 def load_mlx_safetensors_into_torch(torch_module, safetensor_path):
     """
@@ -63,6 +66,7 @@ def load_mlx_safetensors_into_torch(torch_module, safetensor_path):
             new_k = new_k.replace(".net.layers.2.", ".fc2.")
             new_k = new_k.replace("net.layers.0.", "fc1.")
             new_k = new_k.replace("net.layers.2.", "fc2.")
+            new_k = new_k.replace(".norm.", ".norm.") # Unchanged, just to be explicit
             remapped[new_k] = v
         state_dict = remapped
     # Add support for WeakDecoder if any key needs remapping (it perfectly matches)
