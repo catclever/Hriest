@@ -67,10 +67,14 @@ def main():
     
     from safetensors.torch import load_file
     student_safe = os.path.join(ckpt_dir, "student.safetensors")
-    if not os.path.exists(student_safe):
-        print(f"❌ 找不到 {student_safe}")
+    student_pt = os.path.join(ckpt_dir, "student.pt")
+    if os.path.exists(student_safe):
+        student.load_state_dict(load_file(student_safe), strict=True)
+    elif os.path.exists(student_pt):
+        student.load_state_dict(torch.load(student_pt, map_location="cpu"), strict=True)
+    else:
+        print(f"❌ 找不到 {student_safe} 或 {student_pt}")
         return
-    student.load_state_dict(load_file(student_safe), strict=True)
     student.eval()
 
     # 2. Load Teacher Decoder
