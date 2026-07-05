@@ -79,14 +79,40 @@ def main():
 
     # 2. Load Teacher Decoder
     print(f"🔥 加载老师解码器 (WeakDecoder): {args.p0_ckpt}")
+    
+    from safetensors.torch import load_file
+    decoder_safe = os.path.join(args.p0_ckpt, "weak_decoder.safetensors")
+    if not os.path.exists(decoder_safe):
+        print(f"❌ 找不到 {decoder_safe}")
+        return
+        
+    decoder_state = load_file(decoder_safe)
+    
+    # Infer d_model and n_layers dynamically
+    # z_proj.weight has shape (d_model, z_dim)
+    # out_proj.weight has shape (vocab_size, d_model)
+    decoder_d_model = config.d_model
+    if "z_proj.weight" in decoder_state:
+        decoder_d_model = decoder_state["z_proj.weight"].shape[0]
+    elif "out_proj.weight" in decoder_state:
+        decoder_d_model = decoder_state["out_proj.weight"].shape[1]
+        
+    decoder_n_layers = 0
+    for k in decoder_state.keys():
+        if k.startswith("transformer.layers.") or k.startswith("layers."):
+            layer_idx = int(k.split(".")[2] if k.startswith("transformer") else k.split(".")[1])
+            decoder_n_layers = max(decoder_n_layers, layer_idx + 1)
+            
+    if decoder_n_layers == 0:
+        decoder_n_layers = config.n_layers
+        
     decoder = WeakDecoderCUDA(
         z_dim=1024,
         vocab_size=config.vocab_size,
-        d_model=config.d_model,
-        n_layers=config.n_layers
+        d_model=decoder_d_model,
+        n_layers=decoder_n_layers
     ).to(device)
     
-    decoder_safe = os.path.join(args.p0_ckpt, "weak_decoder.safetensors")
     load_mlx_safetensors_into_torch(decoder, decoder_safe)
     decoder.eval()
 
