@@ -58,17 +58,16 @@ def load_mlx_safetensors_into_torch(torch_module, safetensor_path):
     from safetensors.torch import load_file
     state_dict = load_file(safetensor_path)
     target_keys = set(torch_module.state_dict().keys())
-    if not any(k in target_keys for k in state_dict.keys()):
-        remapped = {}
-        for k, v in state_dict.items():
-            new_k = k
-            new_k = new_k.replace(".net.layers.0.", ".fc1.")
-            new_k = new_k.replace(".net.layers.2.", ".fc2.")
-            new_k = new_k.replace("net.layers.0.", "fc1.")
-            new_k = new_k.replace("net.layers.2.", "fc2.")
-            new_k = new_k.replace(".norm.", ".norm.") # Unchanged, just to be explicit
-            remapped[new_k] = v
-        state_dict = remapped
+    remapped = {}
+    for k, v in state_dict.items():
+        new_k = k
+        new_k = new_k.replace(".net.layers.0.", ".fc1.")
+        new_k = new_k.replace(".net.layers.2.", ".fc2.")
+        new_k = new_k.replace("net.layers.0.", "fc1.")
+        new_k = new_k.replace("net.layers.2.", "fc2.")
+        new_k = new_k.replace(".norm.", ".norm.") # Unchanged, just to be explicit
+        remapped[new_k] = v
+    state_dict = remapped
     # Add support for WeakDecoder if any key needs remapping (it perfectly matches)
     for k in list(state_dict.keys()):
         if k.endswith('.wq.weight'):

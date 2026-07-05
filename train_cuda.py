@@ -804,7 +804,7 @@ def get_distill_parser():
     parser.add_argument("--warmup_steps", type=int, default=5000)
     parser.add_argument("--ce_start_step", type=int, default=10000, help="Step to start fading in CE loss")
     parser.add_argument("--ce_full_step", type=int, default=20000, help="Step where CE loss reaches full weight")
-    parser.add_argument("--ce_max_weight", type=float, default=10.0, help="Maximum weight for the Cross Entropy loss")
+    parser.add_argument("--ce_max_weight", type=float, default=1.0, help="Maximum weight for the Cross Entropy loss")
     parser.add_argument("--max_seq_len", type=int, default=256)
     parser.add_argument("--save_steps", type=int, default=10000)
     parser.add_argument("--out_dir", type=str, default="checkpoints/distilled")
