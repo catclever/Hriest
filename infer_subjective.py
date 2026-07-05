@@ -91,7 +91,7 @@ def main():
     # Infer d_model and n_layers dynamically
     # z_proj.weight has shape (d_model, z_dim)
     # out_proj.weight has shape (vocab_size, d_model)
-    decoder_d_model = config.d_model
+    decoder_d_model = 128 # Default fallback
     if "z_proj.weight" in decoder_state:
         decoder_d_model = decoder_state["z_proj.weight"].shape[0]
     elif "out_proj.weight" in decoder_state:
@@ -104,7 +104,7 @@ def main():
             decoder_n_layers = max(decoder_n_layers, layer_idx + 1)
             
     if decoder_n_layers == 0:
-        decoder_n_layers = config.n_layers
+        decoder_n_layers = getattr(config, "decoder_layers", 2)
         
     decoder = WeakDecoderCUDA(
         z_dim=1024,
