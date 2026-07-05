@@ -120,29 +120,38 @@ def main():
     print(f"📝 输入文本 (Prompt): {args.prompt}")
     
     # 3. Encode to Z
-    tokens, _ = tokenizer.encode_batch([args.prompt], max_len=256)
-    tokens = tokens.to(device)
+    # CharTokenizer only has encode(text), returning list of ids
+    token_ids = tokenizer.encode(args.prompt)
+    if not token_ids:
+        print("❌ 输入为空")
+        return
+        
+    tokens = torch.tensor([token_ids], dtype=torch.long).to(device)
     
     with torch.no_grad():
         z_pred = student(tokens) # (1, 1024)
         
     print(f"✨ 成功提取 Z 向量! L2 Norm: {torch.norm(z_pred).item():.4f}, Std: {z_pred.std().item():.4f}")
     
-    # 4. Generate
-    start_token = tokenizer.char_to_id.get(args.prompt[-1], 0) if args.prompt else 0
-    print(f"🚀 开始让 WeakDecoder 根据 Z 向量进行续写 (温度={args.temperature})...")
+    # 4. Generate (Reconstruct)
+    # Phase 0 was an autoencoder (reconstruction).
+    # Since token_inputs didn't have explicit BOS in chunking, the decoder needs the first character as the seed.
+    start_token = token_ids[0]
+    print(f"🚀 开始让 WeakDecoder 根据 Z 向量进行【重建】 (温度={args.temperature})...")
+    print(f"种子字符(首字): {tokenizer.decode([start_token])}")
     
     with torch.no_grad():
         generated_ids = decoder.generate(
             z_pred, 
             start_token=start_token, 
-            max_tokens=args.max_tokens, 
+            max_tokens=max(args.max_tokens, len(token_ids) + 10), 
             temperature=args.temperature
         )
         
     result_text = tokenizer.decode(generated_ids)
     print("\n" + "="*50)
-    print(f"🧠 Z-空间解码结果:\n{args.prompt[:-1]}{result_text}")
+    print(f"🎯 原始输入:\n{args.prompt}")
+    print(f"🧠 Z-空间重建结果:\n{result_text}")
     print("="*50)
 
 if __name__ == "__main__":
