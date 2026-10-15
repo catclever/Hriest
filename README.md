@@ -1,19 +1,69 @@
-# 静态视网膜 (TinyCharEncoder) 蒸馏与评测分析
+# Static Retina (TinyCharEncoder) Distillation and Evaluation Analysis
 
-这是独立于主工程的一项“正向蒸馏（Inward Latent Distillation）”子任务。我们的目标是用一个极轻量的单字级模型（TinyCharEncoder），通过 MSE 强行克隆主工程中 5 大外部预训练模型联合打点形成的绝对物理拓扑空间。
+This is a subtask of "Inward Latent Distillation" independent of the main project. Our goal is to use an extremely lightweight character-level model (TinyCharEncoder) to forcibly clone the absolute physical topological space formed by the joint embeddings of 5 external pre-trained models from the main project via MSE (Mean Squared Error).
 
-## MTEB 评测现象与科学分析
+## Overview
 
-根据在此目录下执行 `evaluate_mteb.py` 得到的真实结果比对：
+This repository provides tools to distill knowledge from large, external pre-trained models into a tiny, custom-built character-level encoder (TinyCharEncoder). The model is designed to act as a "static retina" — a lightweight, pure-native Text-to-Vector encoder explicitly built with Rotary Position Embeddings (RoPE).
 
-* **现象 1（大获成功）：通用相似度任务 (如 LCQMC)**
-  * **得分**：学生 (68.5%) vs 老师(BGE-M3 76.1%)
-  * **结论**：极高分差逼近。这证明了 MSE 正向蒸馏在数学上的绝对成立。你的 6 层 Char 级小模型成功锁死了外部大模型的联合拓扑空间，具备了极其优异的基础常识几何映射能力。
+## Features
 
-* **现象 2（断崖式下跌）：专有逻辑与细分任务 (如 AFQMC)**
-  * **得分**：学生 (23.0%) vs 老师(Xiaobu 60.9% / BGE 40.0%)
-  * **底层原因剖析**：
-    1. **语料维度的盲区**：小模型只吃过 `chunked_mixed_omni` 通用数据集。如果训练集中没有专门教授金融/医疗/法律等长尾专有名词，小模型无从知晓这些组合坐标，只能盲猜。
-    2. **物理容量与拼字极限**：大模型使用 BPE 分词，对专有名词有整体词表记忆；而你的小模型使用 `CharTokenizer`（单字拼装），在仅有 6 层的极小容量下，强行将“蚂”“蚁”“金”“服”四个毫无关联的单字在大脑中组装成“金融科技”的深层拓扑语义，这超越了其物理极限。
-    3. **缺乏动力学消歧义**：小模型在这里仅仅充当静态视网膜，它不懂上下文推理。
-  * **系统定位与战略定力**：这是物理规律的必然！这个静态小模型在这里**不需要**考高分。在整个终极内生架构中，专业的消歧义和长程逻辑推理，是由主仓库中后续的 **Mamba Planner（系统 2 大脑）** 通过引入正交的动态认知流（如字典注入）来完成的。
+- **Tiny Character-Level Encoder**: Uses a simple `CharTokenizer` for character-level assembly, avoiding the need for a complex BPE vocabulary.
+- **RoPE Integration**: Supports infinite length extrapolation without O(N^2) memory bloating during training.
+- **Cross-Framework Support**: Includes native implementations in Apple MLX (for ultra-fast local Mac development) and PyTorch/CUDA (for NVIDIA Linux clusters).
+- **MTEB Evaluation**: Seamlessly wraps the custom TinyCharEncoder into a standard MTEB (Massive Text Embedding Benchmark) interface for rigorous evaluation.
+
+## Installation
+
+First, install the required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+**Note**: By default, `requirements.txt` is configured for PyTorch/CUDA. If you are developing on an Apple Silicon Mac and want to use the MLX backend, comment out the PyTorch requirements and uncomment `mlx>=0.14.0`.
+
+You may also need to install MTEB if you plan to run evaluations:
+```bash
+pip install mteb[zh]
+```
+
+## Architecture
+
+The `TinyCharEncoder` is a 6-layer Transformer with 8 attention heads and a hidden dimension of 1024. It utilizes `RoPEMultiHeadAttention` and aggregates sentence-level semantic representations via masked average pooling. It projects these embeddings into an absolute 1024-D target space mapped by the `GodEncoder`.
+
+## Usage
+
+### Training (Distillation)
+
+To start the distillation process, you need a frozen Phase 0 weights checkpoint to distill from:
+
+```bash
+python train.py --p0_ckpt <path_to_teacher_checkpoint>
+```
+
+You can customize the student architecture or data directories through command-line arguments (e.g., `--student_n_layers 6`, `--batch_size 256`).
+
+### Evaluation
+
+To evaluate the distilled model on C-MTEB tasks:
+
+```bash
+python evaluate_mteb.py --ckpt <path_to_student_checkpoint> --tasks LCQMC BQCorpus AFQMC
+```
+
+## Evaluation Analysis & MTEB Insights
+
+Based on the actual results obtained by executing `evaluate_mteb.py` in this directory:
+
+* **Phenomenon 1 (Great Success): General Similarity Tasks (e.g., LCQMC)**
+  * **Score**: Student (68.5%) vs. Teacher (BGE-M3 76.1%)
+  * **Conclusion**: Extremely close score approximation. This mathematically proves the absolute validity of MSE inward distillation. Your 6-layer character-level small model successfully locked onto the joint topological space of the external large models, demonstrating highly excellent basic common-sense geometric mapping capabilities.
+
+* **Phenomenon 2 (Cliff-like Drop): Domain-Specific Logic and Niche Tasks (e.g., AFQMC)**
+  * **Score**: Student (23.0%) vs. Teacher (Xiaobu 60.9% / BGE 40.0%)
+  * **Underlying Reason Analysis**:
+    1. **Corpus Blind Spots**: The small model has only consumed the `chunked_mixed_omni` general dataset. If the training set does not specifically teach long-tail proper nouns in finance/medical/legal domains, the small model has no way of knowing these coordinate combinations and can only guess blindly.
+    2. **Physical Capacity and Spelling Limits**: Large models use BPE tokenization and have holistic vocabulary memory for proper nouns; whereas your small model uses `CharTokenizer` (single-character assembly). Forcing it to assemble four entirely unrelated characters like "Ant", "Financial", "Services", "Group" into a deep topological semantic of "Fintech" within its tiny 6-layer capacity exceeds its physical limits.
+    3. **Lack of Dynamic Disambiguation**: The small model merely acts as a static retina here; it does not understand contextual reasoning.
+  * **System Positioning and Strategic Focus**: This is an inevitable physical law! This static small model **does not need** to score high here. In the ultimate endogenous architecture, professional disambiguation and long-range logical reasoning are accomplished by the subsequent **Mamba Planner (System 2 Brain)** in the main repository through the introduction of orthogonal dynamic cognitive flows (like dictionary injection).
